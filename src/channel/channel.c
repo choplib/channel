@@ -1,7 +1,7 @@
 #include <pthread.h>
-#include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
+#include <stdint.h>
+#include <stdlib.h>
 
 // FEATURE: zamani gelince runtime yonetimi icin
 // queue objeleri eklendi ama kullanilmiyor
@@ -20,44 +20,59 @@ struct queue_node {
 
 // TODO: pointer lari yerine nesnelerin kendilerinin tutulmasi icin
 // size degiskeni acik birakildi
-typedef struct channel {
-  void **data;
-  int cap;
-  int len;
-  // int size;
+typedef struct {
+    unsigned char *data;
 
-  int head;
-  int tail;
+    size_t elem_size;
+    size_t cap;
+    size_t len;
+    size_t head;
+    size_t tail;
 
-  pthread_mutex_t mut;
-
-  pthread_cond_t received;
-  pthread_cond_t consumed;
+    pthread_mutex_t mutex;
+    pthread_cond_t not_empty;
+    pthread_cond_t not_full;
 } channel;
 
-channel *make_channel(int cap) {
-  channel *ch;
+channel *channel_create(size_t size, size_t cap) {
+    if (size == 0 || cap == 0) {
+        return NULL;
+    }
 
-  if (cap <= 0) {
-    return NULL;
-  }
+    if (cap > (SIZE_MAX - sizeof(channel)) / size) {
+        return NULL;
+    }
 
-  ch = malloc(sizeof *ch + (size_t)cap * sizeof(void *));
-  if (ch == NULL) {
-    return NULL;
-  }
+    channel *ch = malloc(sizeof *ch + cap * size);
+    if (ch == NULL) {
+        return NULL;
+    }
 
-  memset(ch, 0, sizeof *ch);
+    memset(ch, 0, sizeof *ch);
 
-  ch->data = (void *)(ch + 1);
-  ch->cap = cap;
-  ch->len = 0;
+    ch->data = (unsigned char *)(ch + 1);
+    ch->elem_size = size;
+    ch->cap = cap;
 
-  pthread_mutex_init(&ch->mut, NULL);
-  pthread_cond_init(&ch->received, NULL);
-  pthread_cond_init(&ch->consumed, NULL);
+    if (pthread_mutex_init(&ch->mutex, NULL) != 0) {
+        free(ch);
+        return NULL;
+    }
 
-  return ch;
+    if (pthread_cond_init(&ch->not_empty, NULL) != 0) {
+        pthread_mutex_destroy(&ch->mutex);
+        free(ch);
+        return NULL;
+    }
+
+    if (pthread_cond_init(&ch->not_full, NULL) != 0) {
+        pthread_cond_destroy(&ch->not_empty);
+        pthread_mutex_destroy(&ch->mutex);
+        free(ch);
+        return NULL;
+    }
+
+    return ch;
 }
 
 /*
@@ -80,52 +95,70 @@ channel *make_channel(int cap, int size) {
   ch->size = size;
   ch->len = 0;
 
-  pthread_mutex_init(&ch->mut, NULL);
-  pthread_cond_init(&ch->received, NULL);
-  pthread_cond_init(&ch->consumed, NULL);
+  pthread_mutex_init(&ch->mutex, NULL);
+  pthread_cond_init(&ch->not_empty, NULL);
+  pthread_cond_init(&ch->not_full, NULL);
 
   return ch;
 }
 */
 
-static void *pop_from_channel(channel *ch) {
-  pthread_mutex_lock(&ch->mut);
-  while (!ch->len) {
-    pthread_cond_wait(&ch->received, &ch->mut);
-  }
+int channel_recv(channel *ch, void *dst) {
+    if (ch == NULL || dst == NULL) {
+        return -1;
+    }
 
-  ch->len--;
-  void *ret = ch->data[ch->head];
-  ch->head = (ch->head + 1) % ch->cap;
+    pthread_mutex_lock(&ch->mutex);
 
-  pthread_cond_signal(&ch->consumed);
-  pthread_mutex_unlock(&ch->mut);
-  return ret;
+    while (ch->len == 0) {
+        pthread_cond_wait(&ch->not_empty, &ch->mutex);
+    }
+
+    memcpy(
+        dst,
+        ch->data + ch->head * ch->elem_size,
+        ch->elem_size
+    );
+
+    ch->head = (ch->head + 1) % ch->cap;
+    ch->len--;
+
+    pthread_cond_signal(&ch->not_full);
+    pthread_mutex_unlock(&ch->mutex);
+
+    return 0;
 }
 
-void *pop_channel(channel *ch) { return pop_from_channel(ch); }
 
-static void push_from_channel(channel *ch, void *data) {
-  pthread_mutex_lock(&ch->mut);
-  while (ch->cap == ch->len) {
-    pthread_cond_wait(&ch->consumed, &ch->mut);
-  }
+int channel_send(channel *ch, const void *src) {
+    if (ch == NULL || src == NULL) {
+        return -1;
+    }
 
-  ch->len++;
-  ch->data[ch->tail] = data;
-  ch->tail = (ch->tail + 1) % ch->cap;
-  pthread_cond_signal(&ch->received);
+    pthread_mutex_lock(&ch->mutex);
 
-  pthread_mutex_unlock(&ch->mut);
-}
+    while (ch->len == ch->cap) {
+        pthread_cond_wait(&ch->not_full, &ch->mutex);
+    }
 
-void push_channel(channel *ch, void *data) {
-  return push_from_channel(ch, data);
+    memcpy(
+        ch->data + ch->tail * ch->elem_size,
+        src,
+        ch->elem_size
+    );
+
+    ch->tail = (ch->tail + 1) % ch->cap;
+    ch->len++;
+
+    pthread_cond_signal(&ch->not_empty);
+    pthread_mutex_unlock(&ch->mutex);
+
+    return 0;
 }
 
 void free_channel(channel *ch) {
-  pthread_cond_destroy(&ch->consumed);
-  pthread_cond_destroy(&ch->received);
-  pthread_mutex_destroy(&ch->mut);
-  free(ch);
+    pthread_cond_destroy(&ch->not_full);
+    pthread_cond_destroy(&ch->not_empty);
+    pthread_mutex_destroy(&ch->mutex);
+    free(ch);
 }

@@ -1,12 +1,15 @@
 #ifndef CGC_CHANNEL
 #define CGC_CHANNEL
 
+#include <stdlib.h>
+
 typedef struct channel channel;
 
-channel *make_channel(int cap);
-// channel *make_channel(int len, int size);
-void push_channel(channel *, void *data);
-void *pop_channel(channel *);
-void free_channel(channel *);
+channel *channel_create(size_t elem_size, size_t cap);
+
+int channel_send(channel *ch, const void *src);
+int channel_recv(channel *ch, void *dst);
+
+void channel_destroy(channel *ch);
 
 #endif
